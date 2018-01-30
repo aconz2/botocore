@@ -91,7 +91,12 @@ def create_credential_resolver(session, cache=None):
                         load_config=lambda: session.full_config),
         # The new config file has precedence over the legacy
         # config file.
-        ConfigProvider(config_filename=config_file, profile_name=profile_name),
+        ConfigProvider(
+            config_filename=config_file,
+            profile_name=profile_name,
+            client_creator=session.create_client,
+            cache=cache,
+        ),
         OriginalEC2Provider(),
         BotoProvider(),
         container_provider,
@@ -710,6 +715,50 @@ class AssumeRoleCredentialFetcher(CachedCredentialFetcher):
             aws_session_token=frozen_credentials.token,
         )
 
+class MfaCredentialFetcher(CachedCredentialFetcher):
+    def __init__(self, client_creator, source_credentials, mfa_serial,
+                 cache, mfa_prompter=None, expiry_window_seconds=60 * 15):
+
+        self._client_creator = client_creator
+        self._source_credentials = source_credentials
+        self._mfa_serial = mfa_serial
+        self._mfa_prompter = mfa_prompter
+        if self._mfa_prompter is None:
+            self._mfa_prompter = getpass.getpass
+
+        super(MfaCredentialFetcher, self).__init__(
+            cache, expiry_window_seconds
+        )
+
+    def _create_cache_key(self):
+        frozen_credentials = self._source_credentials.get_frozen_credentials()
+        args = {
+            'AccessKeyId': frozen_credentials.access_key,
+            'SecretAccessKey': frozen_credentials.secret_key,
+            }
+        args = json.dumps(args, sort_keys=True)
+        argument_hash = sha1(args.encode('utf-8')).hexdigest()
+        return self._make_file_safe(argument_hash)
+
+    def _get_credentials(self):
+        client = self._create_client()
+        prompt = 'Enter MFA code for %s: ' % self._mfa_serial
+        token_code = self._mfa_prompter(prompt)
+        return client.get_session_token(
+            SerialNumber=self._mfa_serial,
+            TokenCode=token_code
+        )
+
+    def _create_client(self):
+        """Create an STS client using the source credentials."""
+        frozen_credentials = self._source_credentials.get_frozen_credentials()
+        return self._client_creator(
+            'sts',
+            aws_access_key_id=frozen_credentials.access_key,
+            aws_secret_access_key=frozen_credentials.secret_key,
+            aws_session_token=frozen_credentials.token,
+        )
+
 
 class CredentialProvider(object):
     # A short name to identify the provider within botocore.
@@ -1048,12 +1097,14 @@ class ConfigProvider(CredentialProvider):
 
     ACCESS_KEY = 'aws_access_key_id'
     SECRET_KEY = 'aws_secret_access_key'
+    MFA_SERIAL = 'mfa_serial'
     # Same deal as the EnvProvider above.  Botocore originally supported
     # aws_security_token, but the SDKs are standardizing on aws_session_token
     # so we support both.
     TOKENS = ['aws_security_token', 'aws_session_token']
 
-    def __init__(self, config_filename, profile_name, config_parser=None):
+    def __init__(self, config_filename, profile_name, client_creator, cache,
+                 config_parser=None, mfa_prompter=None):
         """
 
         :param config_filename: The session configuration scoped to the current
@@ -1064,6 +1115,8 @@ class ConfigProvider(CredentialProvider):
         """
         self._config_filename = config_filename
         self._profile_name = profile_name
+        self._client_creator = client_creator
+        self.cache = cache
         if config_parser is None:
             config_parser = botocore.configloader.load_config
         self._config_parser = config_parser
@@ -1085,8 +1138,28 @@ class ConfigProvider(CredentialProvider):
                 access_key, secret_key = self._extract_creds_from_mapping(
                     profile_config, self.ACCESS_KEY, self.SECRET_KEY)
                 token = self._get_session_token(profile_config)
-                return Credentials(access_key, secret_key, token,
+                creds = Credentials(access_key, secret_key, token,
                                    method=self.METHOD)
+
+                if self.MFA_SERIAL in profile_config:
+                    creds = MfaCredentialFetcher(
+                        client_creator=self._client_creator,
+                        source_credentials=creds,
+                        mfa_serial=profile_config[self.MFA_SERIAL],
+                        cache=self.cache,
+                        ).fetch_credentials()
+                    return Credentials(
+                        creds['access_key'],
+                        creds['secret_key'],
+                        creds['token'],
+                        method=self.METHOD
+                        )
+
+                    # access_key, secret_key, token = self._get_session_token_mfa(
+                    #     creds, profile_config[self.MFA_SERIAL])
+                    # return Credentials(access_key, secret_key, token,
+                    #                 method=self.METHOD)
+                return creds
         else:
             return None
 
@@ -1094,7 +1167,6 @@ class ConfigProvider(CredentialProvider):
         for token_name in self.TOKENS:
             if token_name in profile_config:
                 return profile_config[token_name]
-
 
 class BotoProvider(CredentialProvider):
     METHOD = 'boto-config'
