@@ -1154,11 +1154,6 @@ class ConfigProvider(CredentialProvider):
                         creds['token'],
                         method=self.METHOD
                         )
-
-                    # access_key, secret_key, token = self._get_session_token_mfa(
-                    #     creds, profile_config[self.MFA_SERIAL])
-                    # return Credentials(access_key, secret_key, token,
-                    #                 method=self.METHOD)
                 return creds
         else:
             return None
