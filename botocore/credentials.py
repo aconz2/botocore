@@ -1130,38 +1130,45 @@ class ConfigProvider(CredentialProvider):
             full_config = self._config_parser(self._config_filename)
         except ConfigNotFound:
             return None
-        if self._profile_name in full_config['profiles']:
-            profile_config = full_config['profiles'][self._profile_name]
-            if self.ACCESS_KEY in profile_config:
-                logger.info("Credentials found in config file: %s",
-                            self._config_filename)
-                access_key, secret_key = self._extract_creds_from_mapping(
-                    profile_config, self.ACCESS_KEY, self.SECRET_KEY)
-                token = self._get_session_token(profile_config)
-                creds = Credentials(access_key, secret_key, token,
-                                   method=self.METHOD)
 
-                if self.MFA_SERIAL in profile_config:
-                    creds = MfaCredentialFetcher(
-                        client_creator=self._client_creator,
-                        source_credentials=creds,
-                        mfa_serial=profile_config[self.MFA_SERIAL],
-                        cache=self.cache,
-                        ).fetch_credentials()
-                    return Credentials(
-                        creds['access_key'],
-                        creds['secret_key'],
-                        creds['token'],
-                        method=self.METHOD
-                        )
-                return creds
-        else:
+        if self._profile_name not in full_config['profiles']:
             return None
+
+        profile_config = full_config['profiles'][self._profile_name]
+
+        if self.ACCESS_KEY not in profile_config:
+            return None
+
+        logger.info("Credentials found in config file: %s",
+                    self._config_filename)
+        access_key, secret_key = self._extract_creds_from_mapping(
+            profile_config, self.ACCESS_KEY, self.SECRET_KEY)
+        token = self._get_session_token(profile_config)
+        creds = Credentials(access_key, secret_key, token,
+                            method=self.METHOD)
+
+        if self.MFA_SERIAL not in profile_config:
+            return creds
+
+        fetcher = MfaCredentialFetcher(
+            client_creator=self._client_creator,
+            source_credentials=creds,
+            mfa_serial=profile_config[self.MFA_SERIAL],
+            cache=self.cache,
+            )
+        creds = fetcher.fetch_credentials()
+        return Credentials(
+            creds['access_key'],
+            creds['secret_key'],
+            creds['token'],
+            method=self.METHOD
+            )
 
     def _get_session_token(self, profile_config):
         for token_name in self.TOKENS:
             if token_name in profile_config:
                 return profile_config[token_name]
+
 
 class BotoProvider(CredentialProvider):
     METHOD = 'boto-config'
